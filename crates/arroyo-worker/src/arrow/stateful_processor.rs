@@ -119,7 +119,7 @@ impl ArrowOperator for StatefulProcessorFunc {
                     )?)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()
-                .map_err(|e| arroyo_rpc::errors::DataflowError::Other(e.to_string()))?;
+                .map_err(|e| arroyo_rpc::errors::DataflowError::ExternalError(e.to_string()))?;
         }
 
         Ok(())
@@ -292,7 +292,7 @@ impl ArrowOperator for StatefulProcessorFunc {
 
         // Build intermediate batch: input columns + result columns
         let mut intermediate_columns: Vec<Arc<dyn Array>> =
-            batch.columns().iter().cloned().collect();
+            batch.columns().to_vec();
         let mut intermediate_fields: Vec<Arc<Field>> =
             batch.schema().fields().iter().cloned().collect();
 

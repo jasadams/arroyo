@@ -1,7 +1,7 @@
 use super::{ArroyoExtension, NodeWithIncomingEdges};
 use crate::builder::{NamedNode, Planner};
 use crate::{DFField, fields_with_qualifiers, schema_from_df_fields};
-use arrow_schema::{DataType, Field};
+use arrow_schema::DataType;
 use arroyo_datastream::logical::{LogicalEdge, LogicalEdgeType, LogicalNode, OperatorName};
 use arroyo_rpc::df::{ArroyoSchema, ArroyoSchemaRef};
 use arroyo_rpc::grpc::api::{StateOpType, StateOperation, StatefulProcessorOperator};
@@ -9,7 +9,6 @@ use datafusion::common::{plan_err, DFSchemaRef, Result, ToDFSchema};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use prost::Message;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 pub(crate) const STATEFUL_PROCESSOR_EXTENSION_NAME: &str = "StatefulProcessorExtension";
 
@@ -38,7 +37,7 @@ pub(crate) struct StatefulOpDesc {
 /// with column references to `output_field` names, and wraps the input plan in
 /// this extension. At physical planning time (`plan_node`), the op expressions
 /// are serialized to physical expressions and encoded into the proto config.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct StatefulProcessorExtension {
     pub(crate) input: LogicalPlan,
     pub(crate) ops: Vec<StatefulOpDesc>,
@@ -48,6 +47,13 @@ pub(crate) struct StatefulProcessorExtension {
     /// The schema produced by the final projection.
     pub(crate) final_schema: DFSchemaRef,
 }
+
+crate::multifield_partial_ord!(
+    StatefulProcessorExtension,
+    input,
+    ops,
+    final_exprs
+);
 
 impl UserDefinedLogicalNodeCore for StatefulProcessorExtension {
     fn name(&self) -> &str {
