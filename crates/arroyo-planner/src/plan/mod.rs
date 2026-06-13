@@ -29,7 +29,7 @@ use crate::{
 };
 use crate::{
     extension::{ArroyoExtension, remote_table::RemoteTableExtension},
-    rewriters::{AsyncUdfRewriter, StatefulProcessorRewriter},
+    rewriters::{AsyncUdfRewriter, StatefulProcessorRewriter, contains_state_function},
 };
 
 mod aggregate;
@@ -340,6 +340,14 @@ impl TreeNodeRewriter for ArroyoRewriter<'_> {
                 .f_up(LogicalPlan::TableScan(table_scan));
             }
             LogicalPlan::Filter(f) => {
+                // Reject state functions used outside SELECT projections
+                if contains_state_function(&f.predicate) {
+                    return plan_err!(
+                        "state functions (state_get, state_put, etc.) \
+                         are only supported in SELECT projections"
+                    );
+                }
+
                 // Joins with windows in the join condition can cause IS NOT NULL predicates to get
                 // pushed down to the table scan; however windows can never be null, and they can't
                 // be evaluated in filters—so we just remove them

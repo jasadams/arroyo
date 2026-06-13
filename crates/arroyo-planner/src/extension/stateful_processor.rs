@@ -5,7 +5,7 @@ use arrow_schema::DataType;
 use arroyo_datastream::logical::{LogicalEdge, LogicalEdgeType, LogicalNode, OperatorName};
 use arroyo_rpc::df::{ArroyoSchema, ArroyoSchemaRef};
 use arroyo_rpc::grpc::api::{StateOpType, StateOperation, StatefulProcessorOperator};
-use datafusion::common::{plan_err, DFSchemaRef, Result, ToDFSchema};
+use datafusion::common::{plan_err, DFSchemaRef, Result};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use prost::Message;
 use std::collections::HashSet;
@@ -163,7 +163,11 @@ impl ArroyoExtension for StatefulProcessorExtension {
         }
 
         let input_schema = input_schemas[0].clone();
-        let input_dfschema = input_schema.schema.clone().to_dfschema()?;
+        // Use the logical plan's DFSchema for serializing op expressions -- it
+        // preserves table qualifiers (e.g. `nexmark.bid`) that the Arrow schema
+        // drops.  The Arrow-derived DFSchema is still used for final_exprs which
+        // reference unqualified intermediate columns.
+        let input_dfschema = self.input.schema().as_ref().clone();
 
         // Collect unique map names, namespaced to avoid collision with
         // internal table names used by other operators.

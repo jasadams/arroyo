@@ -796,7 +796,7 @@ impl StatefulProcessorRewriter {
 }
 
 /// Returns true if the expression tree contains any state function call.
-fn contains_state_function(expr: &Expr) -> bool {
+pub(crate) fn contains_state_function(expr: &Expr) -> bool {
     expr.exists(|e| {
         Ok(matches!(
             e,
@@ -918,5 +918,87 @@ impl TreeNodeRewriter for StatefulProcessorRewriter {
                 final_schema: projection.schema,
             }),
         })))
+    }
+}
+
+#[cfg(test)]
+mod stateful_processor_tests {
+    use super::*;
+    use arroyo_rpc::grpc::api::StateOpType;
+    use datafusion::prelude::col;
+
+    #[test]
+    fn test_is_state_function_positive() {
+        assert!(StatefulProcessorRewriter::is_state_function("state_get"));
+        assert!(StatefulProcessorRewriter::is_state_function("state_put"));
+        assert!(StatefulProcessorRewriter::is_state_function("state_upsert"));
+        assert!(StatefulProcessorRewriter::is_state_function("state_update"));
+        assert!(StatefulProcessorRewriter::is_state_function("state_delete"));
+    }
+
+    #[test]
+    fn test_is_state_function_negative() {
+        assert!(!StatefulProcessorRewriter::is_state_function("my_udf"));
+        assert!(!StatefulProcessorRewriter::is_state_function("get_state"));
+        assert!(!StatefulProcessorRewriter::is_state_function("state_"));
+        assert!(!StatefulProcessorRewriter::is_state_function(""));
+        assert!(!StatefulProcessorRewriter::is_state_function("STATE_GET"));
+    }
+
+    #[test]
+    fn test_state_op_type_mapping() {
+        assert_eq!(
+            StatefulProcessorRewriter::state_op_type("state_get"),
+            StateOpType::StateGet as i32
+        );
+        assert_eq!(
+            StatefulProcessorRewriter::state_op_type("state_put"),
+            StateOpType::StatePut as i32
+        );
+        assert_eq!(
+            StatefulProcessorRewriter::state_op_type("state_upsert"),
+            StateOpType::StateUpsert as i32
+        );
+        assert_eq!(
+            StatefulProcessorRewriter::state_op_type("state_update"),
+            StateOpType::StateUpdate as i32
+        );
+        assert_eq!(
+            StatefulProcessorRewriter::state_op_type("state_delete"),
+            StateOpType::StateDelete as i32
+        );
+    }
+
+    #[test]
+    fn test_contains_state_function_column_expr() {
+        let expr = col("some_column");
+        assert!(!contains_state_function(&expr));
+    }
+
+    #[test]
+    fn test_contains_state_function_literal_expr() {
+        let expr = Expr::Literal(ScalarValue::Utf8(Some("hello".to_string())), None);
+        assert!(!contains_state_function(&expr));
+    }
+
+    #[test]
+    fn test_contains_state_function_binary_expr() {
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(col("a")),
+            op: logical_expr::Operator::Eq,
+            right: Box::new(col("b")),
+        });
+        assert!(!contains_state_function(&expr));
+    }
+
+    #[test]
+    fn test_rewrite_state_calls_no_state_functions() {
+        let expr = col("some_column");
+        let mut ops = vec![];
+        let mut counter = 0;
+        let result = rewrite_state_calls(expr.clone(), &mut ops, &mut counter).unwrap();
+        assert!(ops.is_empty());
+        assert_eq!(counter, 0);
+        assert_eq!(result, expr);
     }
 }

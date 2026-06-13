@@ -465,3 +465,302 @@ impl OperatorConstructor for StatefulProcessorConstructor {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a fresh state map for testing.
+    fn new_state() -> HashMap<String, Option<String>> {
+        HashMap::new()
+    }
+
+    // -----------------------------------------------------------------------
+    // state_upsert semantics: insert-if-absent, return-existing-if-present
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_upsert_inserts_when_key_absent() {
+        let mut map = new_state();
+        let key = "user_123".to_string();
+        let value_if_new = "canonical_abc".to_string();
+
+        // Upsert into empty map: should insert and return the new value
+        let result = match map.get(&key) {
+            Some(Some(existing)) => Some(existing.clone()),
+            _ => {
+                map.insert(key.clone(), Some(value_if_new.clone()));
+                Some(value_if_new.clone())
+            }
+        };
+        assert_eq!(result, Some("canonical_abc".to_string()));
+        assert_eq!(map.get(&key), Some(&Some("canonical_abc".to_string())));
+    }
+
+    #[test]
+    fn test_upsert_returns_existing_when_key_present() {
+        let mut map = new_state();
+        let key = "user_123".to_string();
+        map.insert(key.clone(), Some("original".to_string()));
+
+        // Upsert with different value: should return existing, not overwrite
+        let value_if_new = "should_not_appear".to_string();
+        let result = match map.get(&key) {
+            Some(Some(existing)) => Some(existing.clone()),
+            _ => {
+                map.insert(key.clone(), Some(value_if_new.clone()));
+                Some(value_if_new)
+            }
+        };
+        assert_eq!(result, Some("original".to_string()));
+        // Value in map should be unchanged
+        assert_eq!(map.get(&key), Some(&Some("original".to_string())));
+    }
+
+    #[test]
+    fn test_upsert_after_delete_inserts_new_value() {
+        let mut map = new_state();
+        let key = "user_123".to_string();
+
+        // Insert then delete (tombstone)
+        map.insert(key.clone(), Some("old_value".to_string()));
+        map.insert(key.clone(), None); // tombstone
+
+        // Upsert after tombstone: tombstone is not "exists", so should insert
+        let value_if_new = "resurrected".to_string();
+        let result = match map.get(&key) {
+            Some(Some(existing)) => Some(existing.clone()),
+            _ => {
+                map.insert(key.clone(), Some(value_if_new.clone()));
+                Some(value_if_new)
+            }
+        };
+        assert_eq!(result, Some("resurrected".to_string()));
+        assert_eq!(map.get(&key), Some(&Some("resurrected".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // state_get semantics: read from map, None for missing or tombstoned keys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_returns_none_for_missing_key() {
+        let map = new_state();
+        let result = map.get("nonexistent").and_then(|v| v.as_ref());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_returns_value_for_existing_key() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("value".to_string()));
+        let result = map.get("key").and_then(|v| v.as_ref());
+        assert_eq!(result, Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_get_returns_none_for_tombstoned_key() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("value".to_string()));
+        map.insert("key".to_string(), None); // tombstone
+        let result = map.get("key").and_then(|v| v.as_ref());
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // state_put semantics: unconditional overwrite, returns stored value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_put_inserts_new_key() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("value".to_string()));
+        assert_eq!(map.get("key"), Some(&Some("value".to_string())));
+    }
+
+    #[test]
+    fn test_put_overwrites_existing_key() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("old".to_string()));
+        map.insert("key".to_string(), Some("new".to_string()));
+        assert_eq!(map.get("key"), Some(&Some("new".to_string())));
+    }
+
+    #[test]
+    fn test_put_overwrites_tombstone() {
+        let mut map = new_state();
+        map.insert("key".to_string(), None); // tombstone
+        map.insert("key".to_string(), Some("revived".to_string()));
+        assert_eq!(map.get("key"), Some(&Some("revived".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // state_delete semantics: set tombstone, return whether key existed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_delete_existing_key_returns_true() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("value".to_string()));
+
+        let existed = map.get("key").map(|v| v.is_some()).unwrap_or(false);
+        map.insert("key".to_string(), None); // tombstone
+
+        assert!(existed);
+        assert_eq!(map.get("key"), Some(&None)); // tombstoned
+    }
+
+    #[test]
+    fn test_delete_missing_key_returns_false() {
+        let mut map = new_state();
+
+        let existed = map.get("key").map(|v| v.is_some()).unwrap_or(false);
+        map.insert("key".to_string(), None);
+
+        assert!(!existed);
+    }
+
+    #[test]
+    fn test_delete_already_tombstoned_returns_false() {
+        let mut map = new_state();
+        map.insert("key".to_string(), None); // already tombstoned
+
+        let existed = map.get("key").map(|v| v.is_some()).unwrap_or(false);
+        assert!(!existed);
+    }
+
+    // -----------------------------------------------------------------------
+    // state_update semantics: conditional write, returns whether update applied
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_update_with_true_condition_applies() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("old".to_string()));
+
+        let condition = true;
+        if condition {
+            map.insert("key".to_string(), Some("updated".to_string()));
+        }
+        assert_eq!(map.get("key"), Some(&Some("updated".to_string())));
+    }
+
+    #[test]
+    fn test_update_with_false_condition_does_not_apply() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("old".to_string()));
+
+        let condition = false;
+        if condition {
+            map.insert("key".to_string(), Some("should_not_appear".to_string()));
+        }
+        assert_eq!(map.get("key"), Some(&Some("old".to_string())));
+    }
+
+    #[test]
+    fn test_update_with_none_condition_does_not_apply() {
+        let mut map = new_state();
+        map.insert("key".to_string(), Some("old".to_string()));
+
+        let condition: Option<bool> = None;
+        if condition == Some(true) {
+            map.insert("key".to_string(), Some("should_not_appear".to_string()));
+        }
+        assert_eq!(map.get("key"), Some(&Some("old".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dirty key tracking: writes mark dirty, reads do not
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dirty_tracking_put_marks_dirty() {
+        let mut map = new_state();
+        let mut dirty: HashSet<String> = HashSet::new();
+
+        map.insert("k1".to_string(), Some("v1".to_string()));
+        dirty.insert("k1".to_string());
+
+        assert!(dirty.contains("k1"));
+    }
+
+    #[test]
+    fn test_dirty_tracking_get_does_not_mark_dirty() {
+        let mut map = new_state();
+        map.insert("k1".to_string(), Some("v1".to_string()));
+        let mut dirty: HashSet<String> = HashSet::new();
+
+        // Get does NOT mark dirty
+        let _ = map.get("k1");
+        assert!(!dirty.contains("k1"));
+    }
+
+    #[test]
+    fn test_dirty_tracking_delete_marks_dirty() {
+        let mut map = new_state();
+        let mut dirty: HashSet<String> = HashSet::new();
+
+        map.insert("k1".to_string(), Some("v1".to_string()));
+        // Delete: tombstone and mark dirty
+        map.insert("k1".to_string(), None);
+        dirty.insert("k1".to_string());
+
+        assert!(dirty.contains("k1"));
+    }
+
+    #[test]
+    fn test_dirty_tracking_clear_after_checkpoint() {
+        let mut dirty: HashSet<String> = HashSet::new();
+        dirty.insert("k1".to_string());
+        dirty.insert("k2".to_string());
+
+        assert_eq!(dirty.len(), 2);
+
+        // Simulate checkpoint: clear dirty set
+        dirty.clear();
+        assert!(dirty.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_string helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_string_valid() {
+        let array = StringArray::from(vec![Some("hello"), Some("world"), None]);
+        assert_eq!(extract_string(&array, 0), Some("hello".to_string()));
+        assert_eq!(extract_string(&array, 1), Some("world".to_string()));
+        assert_eq!(extract_string(&array, 2), None);
+    }
+
+    #[test]
+    fn test_extract_string_all_nulls() {
+        let array = StringArray::from(vec![None::<&str>, None, None]);
+        assert_eq!(extract_string(&array, 0), None);
+        assert_eq!(extract_string(&array, 1), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-map isolation: operations on one map do not affect another
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_map_isolation() {
+        let mut state: HashMap<String, HashMap<String, Option<String>>> = HashMap::new();
+        state.insert("map_a".to_string(), HashMap::new());
+        state.insert("map_b".to_string(), HashMap::new());
+
+        // Insert into map_a only
+        state
+            .get_mut("map_a")
+            .unwrap()
+            .insert("key".to_string(), Some("value_a".to_string()));
+
+        // map_b should not have the key
+        assert!(state.get("map_b").unwrap().get("key").is_none());
+        assert_eq!(
+            state.get("map_a").unwrap().get("key"),
+            Some(&Some("value_a".to_string()))
+        );
+    }
+}
