@@ -21,6 +21,8 @@ use datafusion::logical_expr::UserDefinedLogicalNode;
 
 use crate::extension::AsyncUDFExtension;
 use crate::extension::lookup::LookupSource;
+use crate::extension::stateful_processor::{StatefulOpDesc, StatefulProcessorExtension};
+use arroyo_rpc::grpc::api::StateOpType;
 use arroyo_udf_host::parse::{AsyncOptions, UdfType};
 use datafusion::common::tree_node::{
     Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
@@ -759,5 +761,162 @@ impl TreeNodeRewriter for SinkInputRewriter<'_> {
             }
         }
         Ok(Transformed::no(node))
+    }
+}
+
+/// Rewrites projections containing state function calls (`state_get`, `state_put`,
+/// `state_upsert`, `state_update`, `state_delete`) into `StatefulProcessorExtension`
+/// plan nodes. Each state function call is extracted as a `StatefulOpDesc` and the
+/// function call in the projection is replaced by a column reference to the
+/// operator's result column.
+pub struct StatefulProcessorRewriter;
+
+impl StatefulProcessorRewriter {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn is_state_function(name: &str) -> bool {
+        matches!(
+            name,
+            "state_get" | "state_put" | "state_upsert" | "state_update" | "state_delete"
+        )
+    }
+
+    fn state_op_type(name: &str) -> i32 {
+        match name {
+            "state_get" => StateOpType::StateGet as i32,
+            "state_put" => StateOpType::StatePut as i32,
+            "state_upsert" => StateOpType::StateUpsert as i32,
+            "state_update" => StateOpType::StateUpdate as i32,
+            "state_delete" => StateOpType::StateDelete as i32,
+            _ => unreachable!("state_op_type called with non-state function: {name}"),
+        }
+    }
+}
+
+/// Returns true if the expression tree contains any state function call.
+fn contains_state_function(expr: &Expr) -> bool {
+    expr.exists(|e| {
+        Ok(matches!(
+            e,
+            Expr::ScalarFunction(ScalarFunction { func, .. })
+                if StatefulProcessorRewriter::is_state_function(func.name())
+        ))
+    })
+    .unwrap_or(false)
+}
+
+/// Walks an expression tree, replacing state function calls with column references
+/// to the operator's result columns, and accumulating `StatefulOpDesc` entries.
+fn rewrite_state_calls(
+    expr: Expr,
+    ops: &mut Vec<StatefulOpDesc>,
+    counter: &mut usize,
+) -> DFResult<Expr> {
+    let result = expr.transform_up(&mut |e| {
+        let Expr::ScalarFunction(ScalarFunction { ref func, ref args }) = e else {
+            return Ok(Transformed::no(e));
+        };
+
+        if !StatefulProcessorRewriter::is_state_function(func.name()) {
+            return Ok(Transformed::no(e));
+        }
+
+        let func_name = func.name().to_string();
+        let output_field = format!("__state_result_{}", counter);
+        *counter += 1;
+
+        // First argument must be a string literal: the map name
+        let map_name = match &args[0] {
+            Expr::Literal(ScalarValue::Utf8(Some(s)), _) => s.clone(),
+            _ => {
+                return plan_err!(
+                    "first argument to {} must be a string literal (the map name)",
+                    func_name
+                );
+            }
+        };
+
+        // Second argument: the key expression
+        let key_expr = args[1].clone();
+
+        // Third argument (for put/upsert/update): the value expression
+        let value_expr = if args.len() > 2 {
+            Some(args[2].clone())
+        } else {
+            None
+        };
+
+        // Fourth argument (for update only): the condition expression
+        let condition_expr = if args.len() > 3 {
+            Some(args[3].clone())
+        } else {
+            None
+        };
+
+        ops.push(StatefulOpDesc {
+            map_name,
+            op_type: StatefulProcessorRewriter::state_op_type(&func_name),
+            key_expr,
+            value_expr,
+            condition_expr,
+            output_field: output_field.clone(),
+        });
+
+        Ok(Transformed::yes(Expr::Column(Column::new_unqualified(
+            output_field,
+        ))))
+    })?;
+
+    Ok(result.data)
+}
+
+impl TreeNodeRewriter for StatefulProcessorRewriter {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DFResult<Transformed<Self::Node>> {
+        let LogicalPlan::Projection(projection) = node else {
+            // State functions are only valid in SELECT projections.
+            // Check non-projection nodes for misuse and produce a clear error.
+            for e in node.expressions() {
+                if contains_state_function(&e) {
+                    return plan_err!(
+                        "state functions (state_get, state_put, etc.) \
+                         are only supported in SELECT projections"
+                    );
+                }
+            }
+            return Ok(Transformed::no(node));
+        };
+
+        let mut ops: Vec<StatefulOpDesc> = vec![];
+        let mut counter = 0usize;
+
+        // Rewrite each projection expression, extracting state function calls
+        let mut new_exprs = Vec::with_capacity(projection.expr.len());
+        for expr in projection.expr.into_iter() {
+            new_exprs.push(rewrite_state_calls(expr, &mut ops, &mut counter)?);
+        }
+
+        if ops.is_empty() {
+            // No state functions found -- reconstruct unchanged projection
+            return Ok(Transformed::no(LogicalPlan::Projection(
+                Projection::try_new_with_schema(
+                    new_exprs,
+                    projection.input,
+                    projection.schema,
+                )?,
+            )));
+        }
+
+        Ok(Transformed::yes(LogicalPlan::Extension(Extension {
+            node: Arc::new(StatefulProcessorExtension {
+                input: (*projection.input).clone(),
+                ops,
+                final_exprs: new_exprs,
+                final_schema: projection.schema,
+            }),
+        })))
     }
 }
