@@ -39,6 +39,7 @@ pub enum OperatorName {
     SlidingWindowAggregate,
     SessionWindowAggregate,
     UpdatingAggregate,
+    StatefulProcessor,
     ConnectorSource,
     ConnectorSink,
 }
@@ -419,6 +420,7 @@ impl LogicalProgram {
                         "sql-session-window-aggregate".to_string()
                     }
                     OperatorName::UpdatingAggregate => "sql-updating-aggregate".to_string(),
+                    OperatorName::StatefulProcessor => "sql-stateful-processor".to_string(),
                     OperatorName::ConnectorSource => {
                         let Ok(connector_op) = ConnectorOp::decode(&t.operator_config[..]) else {
                             continue;

@@ -29,7 +29,7 @@ use crate::{
 };
 use crate::{
     extension::{ArroyoExtension, remote_table::RemoteTableExtension},
-    rewriters::AsyncUdfRewriter,
+    rewriters::{AsyncUdfRewriter, StatefulProcessorRewriter},
 };
 
 mod aggregate;
@@ -312,7 +312,14 @@ impl TreeNodeRewriter for ArroyoRewriter<'_> {
                 if rewritten.iter().any(|r| r.transformed) {
                     projection.expr = rewritten.into_iter().map(|r| r.data).collect();
                 }
-                return AsyncUdfRewriter::new(self.schema_provider).f_up(node);
+
+                // Intercept state function calls before async UDF rewriting so
+                // that `state_get(...)` etc. are handled first.
+                let result = StatefulProcessorRewriter::new().f_up(node)?;
+                if result.transformed {
+                    return Ok(result);
+                }
+                return AsyncUdfRewriter::new(self.schema_provider).f_up(result.data);
             }
             LogicalPlan::Aggregate(aggregate) => {
                 return AggregateRewriter {
